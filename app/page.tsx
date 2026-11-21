@@ -51,10 +51,34 @@ export default function Chat() {
                   <details>
                     <summary className="cursor-pointer font-semibold text-blue-600">查看参考资料</summary>
                     <div className="mt-2 whitespace-pre-wrap">
-                     {(part.data as string[])?.join('\n\n')}
+                      {(part.data as string[])?.join('\n\n')}
                     </div>
                   </details>
                 </div>;
+
+            }
+            if (part.type.startsWith('tool-')) {
+              const toolPart = part as any;
+
+              // 提取出真正的工具名，比如把 'tool-getWeather' 变成 'getWeather'
+              const displayName = toolPart.toolName || part.type.replace('tool-', '');
+
+              return (
+                <div key={`${message.id}-${i}`} className="my-2 p-3 bg-yellow-50 border border-yellow-200 rounded text-sm text-yellow-800">
+                  <div className="font-bold flex items-center gap-2">
+                    <span className="animate-pulse">⚙️</span> AI 正在调用工具：{displayName}
+                  </div>
+                  <div className="mt-1 text-gray-600">
+                    参数：{JSON.stringify(toolPart.input || toolPart.args || {})}
+                  </div>
+                  {/* v7 中状态可能是 'output-available' 或者 'result' */}
+                  {(toolPart.state === 'result' || toolPart.state === 'output-available') && (
+                    <div className="mt-1 text-green-700 font-medium">
+                      结果：{JSON.stringify(toolPart.output || toolPart.result)}
+                    </div>
+                  )}
+                </div>
+              );
             }
           })}
         </div>

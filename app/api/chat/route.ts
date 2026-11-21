@@ -1,8 +1,9 @@
 import { createOpenAI } from '@ai-sdk/openai';
-import { streamText, UIMessage, convertToModelMessages, createUIMessageStreamResponse, toUIMessageStream, createUIMessageStream, generateText } from 'ai';
+import { streamText, UIMessage, tool, convertToModelMessages, createUIMessageStreamResponse, toUIMessageStream, createUIMessageStream, generateText, isStepCount } from 'ai';
 import fs from 'fs';
 import path from 'path';
-import { Client } from 'pg';
+import { z } from 'zod';
+import { pool } from '@/lib/db';
 
 
 
@@ -84,19 +85,13 @@ export async function POST(req: Request) {
     const queryVector = await getEmbedding(userQuery);
     const queryVectorString = `[${queryVector.join(',')}]`;
     // 2. 连数据库，直接用 pgvector 的 <=> 操作符算余弦距离
-    const client = new Client({
-        connectionString: 'postgresql://shangyifei@localhost:5432/ai_kb'
-    });
-    await client.connect();
-    const res = await client.query(
+    const res = await pool.query(
         `SELECT content, 1 - (embedding <=> $1) AS similarity 
-     FROM documents 
-     ORDER BY embedding <=> $1 
-     LIMIT 1`,
+   FROM documents 
+   ORDER BY embedding <=> $1 
+   LIMIT 1`,
         [queryVectorString]
     );
-
-    await client.end();
 
     let retrievedContext = "没有找到相关资料";
     if (res.rows.length > 0 && res.rows[0].similarity > 0.55) {
@@ -110,17 +105,43 @@ export async function POST(req: Request) {
 ${retrievedContext}
 
 【最高指令】：
-1. 你只能使用上面的【当前参考资料】来回答用户的最新提问。
+1. 你优先使用上面的【当前参考资料】来回答用户的最新提问。
+2. 如果【当前参考资料】中没有答案，但用户的问题涉及实时信息（如天气、时间），请调用你拥有的工具。
 2. 绝对禁止使用你自己大脑里的常识，绝对禁止参考历史对话。
-3. 如果【当前参考资料】中找不到答案，请直接回复：“根据资料，我无法回答这个问题。”不要做任何猜测。
+3. 如果【当前参考资料】和工具中找不到答案，请直接回复：“我无法回答这个问题。”不要做任何猜测。
 4. 回答前，先确认资料是否真的能解答用户的问题。
 `;
     const result = streamText({
         model: deepseek('deepseek-chat'),
         system: systemPrompt,
         messages: await convertToModelMessages(messages.slice(-1)),
+        tools: {
+            getWeather: tool({
+                description: '获取指定城市的实时天气情况',
+                inputSchema: z.object({
+                    city: z.string().describe('城市名称，例如：上海、北京'),
+                }),
+                execute: async ({ city }) => {
+                    console.log(`[Agent] 正在调用天气工具，城市: ${city}`);
+                    // 模拟数据库或 API 返回
+                    const weatherData: Record<string, string> = {
+                        上海: '晴，25度，微风',
+                        北京: '多云，18度，北风3级',
+                    };
+                    return weatherData[city] || '未知城市，暂无数据';
+                },
+            }),
+            getCurrentTime: tool({
+                description: '获取当前的日期和时间',
+                inputSchema: z.object({}),
+                execute: async () => {
+                    console.log(`[Agent] 正在调用时间工具`);
+                    return new Date().toLocaleString('zh-CN');
+                },
+            }),
+        },
+        stopWhen: isStepCount(3),
     });
-
 
     return createUIMessageStreamResponse({
         stream: createUIMessageStream({

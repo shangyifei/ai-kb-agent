@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { Client } from 'pg';
+import { pool } from '@/lib/db';
 import { extractText, getDocumentProxy } from 'unpdf';
 
 async function getEmbedding(text: string): Promise<number[]> {
@@ -51,27 +51,17 @@ export async function POST(req: Request) {
         }
 
         console.log(`文件解析成功，共切分为 ${chunks.length} 块，开始向量化入库...`);
-
-        // 3. 连数据库，循环入库
-        const client = new Client({
-            connectionString: 'postgresql://shangyifei@localhost:5432/ai_kb'
-        });
-        await client.connect();
-
         for (const chunk of chunks) {
             if (chunk.trim().length < 10) continue; // 忽略太短的碎片
 
             const vector = await getEmbedding(chunk);
             const vectorString = `[${vector.join(',')}]`;
 
-            await client.query(
+            await pool.query(
                 'INSERT INTO documents (content, embedding) VALUES ($1, $2)',
                 [chunk, vectorString]
             );
         }
-
-        await client.end();
-
         return NextResponse.json({ success: true, message: `成功入库 ${chunks.length} 个片段` });
 
     } catch (error) {
