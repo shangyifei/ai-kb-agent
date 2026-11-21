@@ -1,5 +1,5 @@
 import { createOpenAI } from '@ai-sdk/openai';
-import { streamText, UIMessage, convertToModelMessages, createUIMessageStreamResponse, toUIMessageStream } from 'ai';
+import { streamText, UIMessage, convertToModelMessages, createUIMessageStreamResponse, toUIMessageStream, createUIMessageStream, generateText } from 'ai';
 import fs from 'fs';
 import path from 'path';
 import { Client } from 'pg';
@@ -46,13 +46,39 @@ export async function POST(req: Request) {
 
     // 获取用户最新一句话的文本内容
     const lastMessage = messages[messages.length - 1];
-    const userQuery = lastMessage.parts.find((p) => p.type === 'text')?.text || '';
+    const originalQuery = lastMessage.parts.find((p) => p.type === 'text')?.text || '';
 
-    if (!userQuery) {
+    if (!originalQuery) {
         return new Response('No query found', { status: 400 });
     }
 
-    console.log('用户提问:', userQuery);
+    let userQuery = originalQuery; // 默认使用原问题
+
+    // 2. 如果存在多轮对话，使用 Vercel AI SDK 的 generateText 进行改写
+    if (messages.length > 1) {
+        try {
+            // 提取最近几轮对话作为上下文
+            const historyForRewrite = messages.slice(-4).map((m) => {
+                const text = m.parts.find((p) => p.type === 'text')?.text || '';
+                return `${m.role}: ${text}`;
+            }).join('\n');
+
+            // 用 Vercel AI SDK 直接调大模型改写
+            const { text: rewrittenQuery } = await generateText({
+                model: deepseek('deepseek-chat'),
+                temperature: 0, // 设为0，保证每次改写结果最稳定
+                system: '你是一个搜索查询重写助手。请根据历史对话，将用户最新的提问重写成一个独立、完整的搜索查询。如果最新提问本身已经完整，请直接输出原话。绝对不要输出任何解释，只输出重写后的那一句话。',
+                prompt: `【历史对话】\n${historyForRewrite}\n\n【最新提问】\n${originalQuery}`,
+            });
+
+            // 清理一下大模型可能多输出的空格或换行
+            userQuery = rewrittenQuery.trim();
+            console.log(`原问题: "${originalQuery}" -> 改写后: "${userQuery}"`);
+
+        } catch (e) {
+            console.error('查询重写失败，使用原问题', e);
+        }
+    }
 
     // 4. 检索阶段：把问题变成向量
     const queryVector = await getEmbedding(userQuery);
@@ -73,23 +99,40 @@ export async function POST(req: Request) {
     await client.end();
 
     let retrievedContext = "没有找到相关资料";
-    if (res.rows.length > 0 && res.rows[0].similarity > 0.4) {
+    if (res.rows.length > 0 && res.rows[0].similarity > 0.55) {
         retrievedContext = res.rows[0].content;
         console.log('数据库检索结果:', retrievedContext, '相似度:', res.rows[0].similarity);
     }
 
     // 7. 生成阶段：拼装 Prompt 发送给 DeepSeek
-    const systemPrompt = `你是一个李锐口诉往事助手。请严格根据以下参考资料回答用户的问题。
-如果参考资料看起来像是乱码、无意义的字符，或者没有相关答案，请直接回答“我不知道”。
-参考资料：\n${retrievedContext}`
+    const systemPrompt = `你是一个严谨的文档问答机器人。
+【当前参考资料】：
+${retrievedContext}
+
+【最高指令】：
+1. 你只能使用上面的【当前参考资料】来回答用户的最新提问。
+2. 绝对禁止使用你自己大脑里的常识，绝对禁止参考历史对话。
+3. 如果【当前参考资料】中找不到答案，请直接回复：“根据资料，我无法回答这个问题。”不要做任何猜测。
+4. 回答前，先确认资料是否真的能解答用户的问题。
+`;
     const result = streamText({
         model: deepseek('deepseek-chat'),
         system: systemPrompt,
-        messages: await convertToModelMessages(messages),
+        messages: await convertToModelMessages(messages.slice(-1)),
     });
 
 
     return createUIMessageStreamResponse({
-        stream: toUIMessageStream({ stream: result.stream }),
+        stream: createUIMessageStream({
+            execute: ({ writer }) => {
+                if (retrievedContext !== "没有找到相关资料") {
+                    writer.write({
+                        type: 'data-sources',
+                        data: [retrievedContext],
+                    });
+                }
+                writer.merge(toUIMessageStream({ stream: result.stream, sendStart: false }));
+            },
+        }),
     });
 }
