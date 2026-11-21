@@ -1,5 +1,7 @@
 import { createOpenAI } from '@ai-sdk/openai';
 import { streamText, UIMessage, convertToModelMessages, createUIMessageStreamResponse, toUIMessageStream } from 'ai';
+import fs from 'fs';
+import path from 'path';
 
 // 1. 配置 DeepSeek 用于对话生成
 const deepseek = createOpenAI({
@@ -7,13 +9,12 @@ const deepseek = createOpenAI({
     apiKey: process.env.DEEPSEEK_API_KEY,
 });
 
-// 模拟我们的“本地知识库”
-const knowledgeBase = [
-    { text: "公司的年假制度是：入职满1年有5天年假，满3年有10天年假。" },
-    { text: "公司的报销流程是：需要在每月25号前，将发票拍照上传到财务系统。" },
-    { text: "老板的名字叫王建国，他非常讨厌员工迟到。" },
-];
-
+// 读取现有的向量库（为了演示方便，每次请求时读，真实工程会放在内存或专门的数据库）
+function loadVectorStore() {
+    const filePath = path.join(process.cwd(), 'data', 'vector-store.json');
+    const fileContent = fs.readFileSync(filePath, 'utf-8');
+    return JSON.parse(fileContent);
+}
 // 2. 调用智谱的 Embedding API 获取向量
 async function getEmbedding(text: string): Promise<number[]> {
     const res = await fetch('https://open.bigmodel.cn/api/paas/v4/embeddings', {
@@ -67,32 +68,30 @@ export async function POST(req: Request) {
 
     // 4. 检索阶段：把问题变成向量
     const queryVector = await getEmbedding(userQuery);
+    const vectorStore = loadVectorStore();
 
     // 5. 遍历知识库，计算相似度
-    let bestMatchIndex = -1;
+    let bestMatch = '';
     let highestScore = -1;
 
-    // 注意：真实工程中，知识库的向量应该预先计算好存起来。这里为了演示，每次提问都临时计算。
-    for (let i = 0; i < knowledgeBase.length; i++) {
-        const docVector = await getEmbedding(knowledgeBase[i].text);
-        const score = cosineSimilarity(queryVector, docVector);
-        console.log(`与段落 ${i} 的相似度:`, score);
-
+    for (const item of vectorStore) {
+        const score = cosineSimilarity(queryVector, item.vector);
         if (score > highestScore) {
             highestScore = score;
-            bestMatchIndex = i;
+            bestMatch = item.text;
         }
     }
+
 
     // 6. 拼装上下文
     // 我们设定一个阈值（比如0.5），如果最高分都低于这个值，说明知识库里没有相关内容
     let retrievedContext = "没有找到相关资料";
-    if (highestScore > 0.4 && bestMatchIndex !== -1) {
-        retrievedContext = knowledgeBase[bestMatchIndex].text;
+    if (highestScore > 0.4 && bestMatch) {
+        retrievedContext = bestMatch;
     }
-
-    console.log('最终检索到的上下文:', retrievedContext, '相似度得分:', highestScore);
-
+    console.log('当前提问:', userQuery);
+    console.log('匹配得分:', highestScore);
+    console.log('检索到的上下文:', retrievedContext);
     // 7. 生成阶段：拼装 Prompt 发送给 DeepSeek
     const systemPrompt = `你是一个公司助手。请严格根据以下参考资料回答用户的问题。如果参考资料里没有相关答案，请直接回答“我不知道”。\n\n参考资料：\n${retrievedContext}`;
 
