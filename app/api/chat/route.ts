@@ -79,8 +79,9 @@ export async function POST(req: Request) {
     }
 
     // 7. 生成阶段：拼装 Prompt 发送给 DeepSeek
-    const systemPrompt = `你是一个公司助手。请严格根据以下参考资料回答用户的问题。如果参考资料里没有相关答案，请直接回答“我不知道”。\n\n参考资料：\n${retrievedContext}`;
-
+    const systemPrompt = `你是一个李锐口诉往事助手。请严格根据以下参考资料回答用户的问题。
+如果参考资料看起来像是乱码、无意义的字符，或者没有相关答案，请直接回答“我不知道”。
+参考资料：\n${retrievedContext}`
     const result = streamText({
         model: deepseek('deepseek-chat'),
         system: systemPrompt,
